@@ -193,11 +193,13 @@ void uvmunmap_old(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
-  #if SELECTION == NONE
+  #ifdef NONE
     uvmunmap_old(pagetable,va,npages,do_free);
     return;
   #endif
-
+  #ifndef NONE
+  struct proc * p = myproc();
+  #endif
   uint64 a;
   pte_t *pte;
 
@@ -214,18 +216,18 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     if(do_free){
       uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
-      #if SELECTION != NONE
+      #ifndef NONE
             if(a>>PGSIZE_SHIFT_BITS < MAX_TOTAL_PAGES){
-              p->counter_meta_data[a>>PGSIZE_SHIFT_BITS].on_phy_mem = 0;
-              pcounter_meta_data[a>>PGSIZE_SHIFT_BITS].offset_in_swap = -1;
+              p->page_metadata[a>>PGSIZE_SHIFT_BITS].on_phy_mem = 0;
+              p->page_metadata[a>>PGSIZE_SHIFT_BITS].offset_in_swap = -1;
             }
       #endif
     }
     else
     {
-      #if SELECTION != NONE
+      #ifndef NONE
             if(a>>PGSIZE_SHIFT_BITS < MAX_TOTAL_PAGES){
-              pcounter_meta_data[a>>PGSIZE_SHIFT_BITS].offset_in_swap = -1;
+              p->page_metadata[a>>PGSIZE_SHIFT_BITS].offset_in_swap = -1;
             }
       #endif
     }   
@@ -265,6 +267,7 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
 uint64
 uvmalloc_old(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 {
+  printf("uvmold alloc");
   char *mem;
   uint64 a;
   if (newsz < oldsz)
@@ -296,14 +299,14 @@ uvmalloc_old(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 uint64
 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 {
-  #if SELECTION == NONE
+  #ifdef NONE
     return uvmalloc_old(pagetable, oldsz, newsz);
   #endif 
 
   pte_t *curr_pte;
   char *mem;
   uint64 a;
-  struct proc *p = p;
+  struct proc *p = myproc();
 
   if (newsz < oldsz)
     return oldsz;
@@ -312,8 +315,8 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 
   for (a = oldsz; a < newsz; a += PGSIZE)
   {
-
-    if (a >> PGSIZE_SHIFT_BITS > MAX_TOTAL_PAGES)
+    
+    if (a >> PGSIZE_SHIFT_BITS > MAX_TOTAL_PAGES-1)
     {
       panic("alloc more than MAX_TOTAL_PAGES");
     }
@@ -321,6 +324,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
     // checking if we need to swap pages
     if (count_pages_in_physical_memory(p) >= MAX_PSYC_PAGES)
     {
+      printf("here");
       // Map a new page
       if (mappages(pagetable, a, PGSIZE, 0, PTE_W | PTE_R | PTE_X | PTE_U | PTE_PG) < 0)
       {
@@ -357,6 +361,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
       p->page_metadata[a>>PGSIZE_SHIFT_BITS].counter = reset_counter();
     }
   }
+
   return newsz;
 }
 
@@ -403,6 +408,7 @@ freewalk(pagetable_t pagetable)
 void
 uvmfree(pagetable_t pagetable, uint64 sz)
 {
+  printf("size before free : %d", sz);
   if(sz > 0)
     uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
   freewalk(pagetable);
@@ -446,7 +452,7 @@ uvmcopy_old(pagetable_t old, pagetable_t new, uint64 sz)
 
 int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
-  #if SELECTION == NONE
+  #ifdef NONE
     return uvmcopy_old(old,new,sz);
   #endif
 
@@ -469,6 +475,10 @@ int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       goto err;
       memmove(mem, (char *)pa, PGSIZE);
     }
+    else
+    {
+      mem = 0;
+    }   
     if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0)
     {
       kfree(mem);
@@ -615,16 +625,16 @@ void update_page_counters(){
 
 void
 update_age(void){
-  #if SELECTION == NFUA
-      update_page_counters();
+  #ifdef NFUA
+    update_page_counters();
   #endif
-  #if SELECTION == LAPA
-      update_page_counters();
+  #ifdef LAPA
+    update_page_counters();
   #endif
-  #if SELECTION==SCFIFO
+  #ifdef SCFIFO
   return;
   #endif
-return;
+  return;
 }
 
 int NFUA_impl(struct proc *p){
@@ -688,10 +698,10 @@ int LAPA_impl(struct proc *p)
 // Using one of the algorithms to determine the page to be swapped
 int get_page_to_swap_out(struct proc * p)
 {
-  #if SELECTION==NFUA
+  #ifdef NFUA
     return NFUA_impl(p);
   #endif
-  #if SELECTION==LAPA
+  #ifdef LAPA
     return LAPA_impl(p);
   #endif
   return 0;
@@ -702,7 +712,7 @@ int count_pages_in_physical_memory(struct proc *p)
   int counter_total_in_mem_pages=0;
   for(int i=0;i<MAX_TOTAL_PAGES;i++)
   {
-    if(!p->page_metadata[i].on_phy_mem)
+    if(p->page_metadata[i].on_phy_mem)
     {
       counter_total_in_mem_pages++;
     }
@@ -773,10 +783,10 @@ void swap_page_into_file(uint64 offset,struct proc * p){
 
 int reset_counter()
 {
-   #if SELECTION == NFUA
+   #ifdef NFUA
     return 0;
   #endif
-  #if SELECTION == LAPA
+  #ifdef LAPA
     return MAX_INT;
   #endif
   // #if SELECTION==SCFIFO
@@ -835,7 +845,7 @@ int handle_pagefault(uint64 pfault_addr)
     return 0;
   }
   else if (pfault_addr <= p->sz){
-    //printf("Page Fault - Lazy allocation\n");
+    printf("Page Fault - Lazy allocation\n");
     lazy_memory_allocation(pfault_addr);
     return 0;
   }

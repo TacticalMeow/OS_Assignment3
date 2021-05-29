@@ -182,6 +182,7 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             handle_pagefault(uint64);
 void            update_age(void);
+int             count_pages_in_physical_memory(struct proc *);
 
 // plic.c
 void            plicinit(void);

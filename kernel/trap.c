@@ -66,7 +66,7 @@ usertrap(void)
 
     syscall();
   }
-  #if SELECTION == NONE
+  #ifndef NONE
   else if(r_scause() == 13 || r_scause() == 15 || r_scause() == 12)
   {
     handle_pagefault(r_stval());

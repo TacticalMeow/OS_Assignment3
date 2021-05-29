@@ -136,8 +136,9 @@ found:
     release(&p->lock);
     return 0;
   }
-#if SELECTION != NONE
-  for(int i=0 ; i<MAX_TOTAL_PAGES ; i++)
+#ifndef NONE
+
+  for( int i = 0 ; i < MAX_TOTAL_PAGES ; i++ )
   {
     p->page_metadata[i].offset_in_swap = -1;
     p->page_metadata[i].counter = 0;
@@ -145,8 +146,13 @@ found:
   }
 
   if(p->pid>1)
+  {
+    release(&p->lock);
     if(createSwapFile(p)!=0)
       return 0;
+    acquire(&p->lock);
+  }
+
 #endif
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -283,7 +289,7 @@ growproc_old(int n)
 int
 growproc(int n)
 {
-  #if SELECTION == NONE
+  #ifdef NONE
     return growproc_old(n);
   #endif
   uint sz;
@@ -358,7 +364,8 @@ fork(void)
   pid = np->pid;
 
   //assign 3
-#if SELECTION != NONE
+#ifndef NONE
+  release(&np->lock);
   if (createSwapFile(np) != 0)
   {
     panic("swap for child");
@@ -367,7 +374,7 @@ fork(void)
   {
     copy_swap_file(np);
   }
-
+  acquire(&np->lock);
   for (int i = 0; i < MAX_TOTAL_PAGES; i++)
   {
     np->page_metadata[i].counter = myproc()->page_metadata[i].counter;
@@ -424,7 +431,7 @@ exit(int status)
     }
   }
 
-#if SELECTION != NONE
+#ifndef NONE
   if(p->pid > 1) //not init or sh
   {
     removeSwapFile(p);
@@ -533,8 +540,8 @@ scheduler(void)
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
-        #if SELECTION != NONE
-        update_age();
+        #ifndef NONE
+          update_age();
         #endif
         // Process is done running for now.
         // It should have changed its p->state before coming back.
