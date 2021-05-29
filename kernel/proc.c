@@ -120,6 +120,8 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+
+
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -134,7 +136,18 @@ found:
     release(&p->lock);
     return 0;
   }
+#if SELECTION != NONE
+  for(int i=0 ; i<MAX_TOTAL_PAGES ; i++)
+  {
+    p->page_metadata[i].offset_in_swap = -1;
+    p->page_metadata[i].counter = 0;
+    p->page_metadata[i].on_phy_mem = 0;
+  }
 
+  if(p->pid>1)
+    if(createSwapFile(p)!=0)
+      return 0;
+#endif
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -250,7 +263,7 @@ userinit(void)
 // Grow or shrink user memory by n bytes.
 // Return 0 on success, -1 on failure.
 int
-growproc(int n)
+growproc_old(int n)
 {
   uint sz;
   struct proc *p = myproc();
@@ -265,6 +278,45 @@ growproc(int n)
   }
   p->sz = sz;
   return 0;
+}
+
+int
+growproc(int n)
+{
+  #if SELECTION == NONE
+    return growproc_old(n);
+  #endif
+  uint sz;
+  struct proc *p = myproc();
+
+  sz = p->sz;
+  if(n < 0){
+    sz = uvmdealloc(p->pagetable, sz, sz + n);
+  }
+  p->sz = p->sz + n;
+  return 0;
+}
+
+
+void 
+copy_swap_file(struct proc* child){
+  struct proc *pParent = myproc();
+  int offset;
+  for (uint64 i = 0; i < pParent->sz; i += PGSIZE)
+  {
+    offset = pParent->page_metadata[i / PGSIZE].offset_in_swap;
+    if (offset != -1)
+    {
+      char *buffer;
+      if ((buffer = kalloc()) == 0)
+        panic("not enough space to kalloc");
+      if (readFromSwapFile(pParent, buffer, offset, PGSIZE) == -1)
+        panic("read swap file failed\n");
+      if (writeToSwapFile(child, buffer, offset, PGSIZE) == -1)
+        panic("write swap file failed\n");
+      kfree(buffer);
+    }
+  }
 }
 
 // Create a new process, copying the parent.
@@ -305,6 +357,25 @@ fork(void)
 
   pid = np->pid;
 
+  //assign 3
+#if SELECTION != NONE
+  if (createSwapFile(np) != 0)
+  {
+    panic("swap for child");
+  }
+  if (p->pid > 1)
+  {
+    copy_swap_file(np);
+  }
+
+  for (int i = 0; i < MAX_TOTAL_PAGES; i++)
+  {
+    np->page_metadata[i].counter = myproc()->page_metadata[i].counter;
+    np->page_metadata[i].offset_in_swap = p->page_metadata[i].offset_in_swap;
+    np->page_metadata[i].on_phy_mem = p->page_metadata[i].on_phy_mem;
+  }
+#endif
+  //end assign 3
   release(&np->lock);
 
   acquire(&wait_lock);
@@ -352,6 +423,14 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+
+#if SELECTION != NONE
+  if(p->pid > 1) //not init or sh
+  {
+    removeSwapFile(p);
+  }
+#endif
+
 
   begin_op();
   iput(p->cwd);
@@ -454,7 +533,9 @@ scheduler(void)
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
-
+        #if SELECTION != NONE
+        update_age();
+        #endif
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;

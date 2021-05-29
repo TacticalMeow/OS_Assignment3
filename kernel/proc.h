@@ -1,3 +1,14 @@
+#define MAX_PSYC_PAGES 16
+#define MAX_TOTAL_PAGES 32
+
+
+// per-process data for single page , contains a single pte and its location on the swap file
+struct pte_swap_metadata {
+  uint64 offset_in_swap;
+  int on_phy_mem;
+  int counter;
+};
+
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -105,6 +116,8 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-
+  int current_phy_pages;
   struct file *swapFile;
+
+  struct pte_swap_metadata page_metadata[MAX_TOTAL_PAGES];
 };

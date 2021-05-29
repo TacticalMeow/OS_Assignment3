@@ -5,7 +5,13 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
+#define PGSIZE_SHIFT_BITS 12
 
+int count_pages_in_physical_memory(struct proc *p);
+uint64 file_empty_offset_location(struct proc *p);
+int reset_counter(void);
 /*
  * the kernel's page table.
  */
@@ -57,7 +63,7 @@ kvminit(void)
 }
 
 // Switch h/w page table register to the kernel's page table,
-// and enable paging.
+// and enable pcounter.
 void
 kvminithart()
 {
@@ -122,7 +128,7 @@ walkaddr(pagetable_t pagetable, uint64 va)
 
 // add a mapping to the kernel page table.
 // only used when booting.
-// does not flush TLB or enable paging.
+// does not flush TLB or enable pcounter.
 void
 kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 {
@@ -156,12 +162,42 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   return 0;
 }
 
+void uvmunmap_old(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+{
+  uint64 a;
+  pte_t *pte;
+
+  if ((va % PGSIZE) != 0)
+    panic("uvmunmap: not aligned");
+
+  for (a = va; a < va + npages * PGSIZE; a += PGSIZE)
+  {
+    if ((pte = walk(pagetable, a, 0)) == 0)
+      panic("uvmunmap: walk");
+    if ((*pte & PTE_V) == 0)
+      panic("uvmunmap: not mapped");
+    if (PTE_FLAGS(*pte) == PTE_V)
+      panic("uvmunmap: not a leaf");
+    if (do_free)
+    {
+      uint64 pa = PTE2PA(*pte);
+      kfree((void *)pa);
+    }
+    *pte = 0;
+  }
+}
+
 // Remove npages of mappings starting from va. va must be
 // page-aligned. The mappings must exist.
 // Optionally free the physical memory.
 void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
+  #if SELECTION == NONE
+    uvmunmap_old(pagetable,va,npages,do_free);
+    return;
+  #endif
+
   uint64 a;
   pte_t *pte;
 
@@ -171,14 +207,28 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0)
+    if((*pte & PTE_V) == 0 && (*pte & PTE_PG)==0)
       panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
       uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
+      #if SELECTION != NONE
+            if(a>>PGSIZE_SHIFT_BITS < MAX_TOTAL_PAGES){
+              p->counter_meta_data[a>>PGSIZE_SHIFT_BITS].on_phy_mem = 0;
+              pcounter_meta_data[a>>PGSIZE_SHIFT_BITS].offset_in_swap = -1;
+            }
+      #endif
     }
+    else
+    {
+      #if SELECTION != NONE
+            if(a>>PGSIZE_SHIFT_BITS < MAX_TOTAL_PAGES){
+              pcounter_meta_data[a>>PGSIZE_SHIFT_BITS].offset_in_swap = -1;
+            }
+      #endif
+    }   
     *pte = 0;
   }
 }
@@ -212,29 +262,99 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
   memmove(mem, src, sz);
 }
 
+uint64
+uvmalloc_old(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
+{
+  char *mem;
+  uint64 a;
+  if (newsz < oldsz)
+    return oldsz;
+
+  oldsz = PGROUNDUP(oldsz);
+  for (a = oldsz; a < newsz; a += PGSIZE)
+  {
+
+    mem = kalloc();
+    if (mem == 0)
+    {
+      uvmdealloc(pagetable, a, oldsz);
+      return 0;
+    }
+    memset(mem, 0, PGSIZE);
+    if (mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W | PTE_X | PTE_R | PTE_U) != 0)
+    {
+      kfree(mem);
+      uvmdealloc(pagetable, a, oldsz);
+      return 0;
+    }
+  }
+  return newsz;
+}
+
 // Allocate PTEs and physical memory to grow process from oldsz to
 // newsz, which need not be page aligned.  Returns new size or 0 on error.
 uint64
 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 {
+  #if SELECTION == NONE
+    return uvmalloc_old(pagetable, oldsz, newsz);
+  #endif 
+
+  pte_t *curr_pte;
   char *mem;
   uint64 a;
+  struct proc *p = p;
 
-  if(newsz < oldsz)
+  if (newsz < oldsz)
     return oldsz;
 
   oldsz = PGROUNDUP(oldsz);
-  for(a = oldsz; a < newsz; a += PGSIZE){
-    mem = kalloc();
-    if(mem == 0){
-      uvmdealloc(pagetable, a, oldsz);
-      return 0;
+
+  for (a = oldsz; a < newsz; a += PGSIZE)
+  {
+
+    if (a >> PGSIZE_SHIFT_BITS > MAX_TOTAL_PAGES)
+    {
+      panic("alloc more than MAX_TOTAL_PAGES");
     }
-    memset(mem, 0, PGSIZE);
-    if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
-      kfree(mem);
-      uvmdealloc(pagetable, a, oldsz);
-      return 0;
+
+    // checking if we need to swap pages
+    if (count_pages_in_physical_memory(p) >= MAX_PSYC_PAGES)
+    {
+      // Map a new page
+      if (mappages(pagetable, a, PGSIZE, 0, PTE_W | PTE_R | PTE_X | PTE_U | PTE_PG) < 0)
+      {
+        uvmdealloc(pagetable, newsz, oldsz);
+        return 0;
+      }
+
+      //change the relevant pte to non valid (since it will be in swap)
+      curr_pte = walk(pagetable, a, 0);
+
+      *curr_pte = *curr_pte & (~PTE_V);
+
+      int offset = file_empty_offset_location(p);
+
+      p->page_metadata[a >> PGSIZE_SHIFT_BITS].offset_in_swap = offset;
+    }
+    else
+    {
+      mem = kalloc();
+      if (mem == 0)
+      {
+        uvmdealloc(pagetable, a, oldsz);
+        return 0;
+      }
+      memset(mem, 0, PGSIZE);
+      if (mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W | PTE_X | PTE_R | PTE_U) != 0)
+      {
+        kfree(mem);
+        uvmdealloc(pagetable, a, oldsz);
+        return 0;
+      }
+      //set page metadata after allocating page
+      p->page_metadata[a>>PGSIZE_SHIFT_BITS].on_phy_mem = 1;
+      p->page_metadata[a>>PGSIZE_SHIFT_BITS].counter = reset_counter();
     }
   }
   return newsz;
@@ -295,7 +415,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int
-uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+uvmcopy_old(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
@@ -320,6 +440,44 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return 0;
 
  err:
+  uvmunmap(new, 0, i / PGSIZE, 1);
+  return -1;
+}
+
+int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+{
+  #if SELECTION == NONE
+    return uvmcopy_old(old,new,sz);
+  #endif
+
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+  char *mem;
+  for (i = 0; i < sz; i += PGSIZE)
+  {
+    if ((pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy: pte should exist");
+    if ((*pte & PTE_V) == 0 && (*pte & PTE_PG) == 0)
+      panic("uvmcopy: page not present");
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    //assign3 check if we are on swap
+    if((*pte & PTE_PG) == 0)
+    {
+      if ((mem = kalloc()) == 0)
+      goto err;
+      memmove(mem, (char *)pa, PGSIZE);
+    }
+    if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0)
+    {
+      kfree(mem);
+      goto err;
+    }
+  }
+  return 0;
+
+err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
@@ -429,3 +587,263 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+//assignment 3 - swapping algorithms helper functions
+
+void update_page_counters(){
+ struct proc * p = myproc();
+ pte_t * pte;
+ for(int i=0; i<MAX_TOTAL_PAGES; i++){
+
+      uint page_va = i << PGSIZE_SHIFT_BITS; //get the related va for the page
+
+      pte = walk(myproc()->pagetable, page_va, 0); //find pte of page va
+
+      if(pte!=0 && (*pte & PTE_V)){
+
+        p->page_metadata[i].counter = p->page_metadata[i].counter >> 1;
+
+        if(*pte & PTE_A) //if the page was accessed add the msb bit to the counter
+        {
+          p->page_metadata[i].counter = p->page_metadata[i].counter | INT_MSB;
+          *pte = *pte & (~PTE_A);
+        }
+
+      }
+    }
+}
+
+void
+update_age(void){
+  #if SELECTION == NFUA
+      update_page_counters();
+  #endif
+  #if SELECTION == LAPA
+      update_page_counters();
+  #endif
+  #if SELECTION==SCFIFO
+  return;
+  #endif
+return;
+}
+
+int NFUA_impl(struct proc *p){
+  uint min_age = -1;
+  int page_idx = -1;
+  pte_t *pte;
+
+  for (int i = 0; i < MAX_TOTAL_PAGES; i++){ 
+
+    pte = walk(p->pagetable,i<<PGSIZE_SHIFT_BITS,0);
+
+    if (pte!=0 && (*pte & PTE_U) && p->page_metadata[i].on_phy_mem){
+        if (min_age == -1 || (uint)p->page_metadata[i].counter < min_age){
+          min_age = p->page_metadata[i].counter;
+          page_idx = i;
+        }
+      }
+  }
+
+  if(min_age == -1)
+    panic("min age -1");
+  return page_idx;
+}
+
+int count_bits(uint x){
+  int counter = 0;
+  while(x > 0) {
+      counter += x & 1;
+      x >>= 1;
+  }
+  return counter;
+}
+
+int LAPA_impl(struct proc *p)
+{
+  pte_t *pte;
+  int min_ones = -1;
+  int min_age = -1;
+  int index_page = -1;
+  uint age;
+  for (int i = 0; i < MAX_TOTAL_PAGES; i++)
+  {
+    pte = walk(p->pagetable,i<<PGSIZE_SHIFT_BITS,0);
+    if (pte!=0 && (*pte & PTE_U) && p->page_metadata[i].on_phy_mem)
+    {
+      age = p->page_metadata[i].counter;
+      int count_ones = count_bits(age);
+      if (min_ones == -1 || count_ones < min_ones || (count_ones == min_ones && age < min_age))
+      {
+        min_ones = count_ones;
+        min_age = age;
+        index_page = i;
+      }
+    }
+  }
+  if (min_ones == -1)
+    panic("min age -1");
+  return index_page;
+}
+
+// Using one of the algorithms to determine the page to be swapped
+int get_page_to_swap_out(struct proc * p)
+{
+  #if SELECTION==NFUA
+    return NFUA_impl(p);
+  #endif
+  #if SELECTION==LAPA
+    return LAPA_impl(p);
+  #endif
+  return 0;
+}
+
+int count_pages_in_physical_memory(struct proc *p)
+{
+  int counter_total_in_mem_pages=0;
+  for(int i=0;i<MAX_TOTAL_PAGES;i++)
+  {
+    if(!p->page_metadata[i].on_phy_mem)
+    {
+      counter_total_in_mem_pages++;
+    }
+  }
+  return counter_total_in_mem_pages;
+}
+
+uint64 file_empty_offset_location(struct proc *p)
+{
+  // flag to mark used offsets
+  int in_use = 0;
+
+  // the empty offset in file that was found.
+  uint empty_offset = -1;
+
+
+  for(int i=0; i<p->sz; i = i+PGSIZE)
+  {
+    in_use = 0;
+    for(int j=0; j<MAX_TOTAL_PAGES; j++){
+      if(p->page_metadata[j].offset_in_swap == i){
+        in_use = 1;
+        goto offset_in_use;
+      }
+    }
+
+    offset_in_use:
+
+    if(in_use == 0)
+    {
+      empty_offset = i;
+      goto found_empty; 
+    }
+  }
+
+  found_empty:
+
+  return empty_offset;
+
+}
+
+
+
+void swap_page_into_file(uint64 offset,struct proc * p){
+
+  int swap_out_idx = get_page_to_swap_out(p);
+
+  uint64 page_to_swapout_va = swap_out_idx * PGSIZE;
+
+  pte_t *swapout_pte = walk(p->pagetable, page_to_swapout_va, 0);
+
+  //write the information from this file to memory
+  uint64 physical_addr = PTE2PA(*swapout_pte);
+
+  printf("Chosen page %d. Data in chosen page is %s\n", swap_out_idx, physical_addr);
+
+  if (writeToSwapFile(p, (char *)physical_addr, offset, PGSIZE) == -1)
+    panic("write to file failed");
+
+  //free the RAM memmory of the swapped page
+  kfree((void *)physical_addr);
+  *swapout_pte = (*swapout_pte & (~PTE_V)) | PTE_PG;
+
+  p->page_metadata[swap_out_idx].offset_in_swap = offset;
+  p->page_metadata[swap_out_idx].on_phy_mem = 0;
+}
+
+
+int reset_counter()
+{
+   #if SELECTION == NFUA
+    return 0;
+  #endif
+  #if SELECTION == LAPA
+    return MAX_INT;
+  #endif
+  // #if SELECTION==SCFIFO
+  //   return insert_to_queue(fifo_init_pages);
+  // #endif 
+  return 0;
+}
+
+void swap_page_in(uint64 faulting_address, pte_t * missing_pte,struct proc * p){
+  //get the page number of the missing in ram page
+  int faulting_page_idx = PGROUNDDOWN(faulting_address)/PGSIZE;
+
+  //get its offset in the saved file
+  uint offset = p->page_metadata[faulting_page_idx].offset_in_swap;
+  if(offset == -1){
+    panic("offset is -1");
+  }
+  
+  char* new_pa_for_page; //allocate new buffer in physical addr to hold the swapped in page
+  if((new_pa_for_page = kalloc()) == 0)
+    panic("swap in - kalloc");
+
+  if (readFromSwapFile(p,new_pa_for_page ,offset,PGSIZE) == -1)
+    panic("swap in - swapfile read");
+
+  if(count_pages_in_physical_memory(p) >= MAX_PSYC_PAGES)
+    swap_page_into_file(offset,p);
+
+  *missing_pte = PA2PTE((uint64)new_pa_for_page) | ((PTE_FLAGS(*missing_pte)& ~PTE_PG) | PTE_V);
+  
+  // Clean up and update new page_metadata
+  p->page_metadata[faulting_page_idx].counter = reset_counter();
+
+  p->page_metadata[faulting_page_idx].offset_in_swap = -1;
+
+  p->page_metadata[faulting_page_idx].on_phy_mem = 1;
+  
+  
+  sfence_vma(); //refresh TLB
+}
+
+void lazy_memory_allocation(uint64 faulting_address){
+  uvmalloc(myproc()->pagetable,PGROUNDDOWN(faulting_address), PGROUNDDOWN(faulting_address) + PGSIZE);     
+}
+
+
+int handle_pagefault(uint64 pfault_addr)
+{ 
+  struct proc * p = myproc();  
+  pte_t * pte = walk(p->pagetable, pfault_addr, 0);
+
+
+  if(pte != 0 && (!(*pte & PTE_V) && *pte & PTE_PG)){
+    printf("Page Fault - Page was out of memory\n");
+    swap_page_in(pfault_addr, pte, p);
+    return 0;
+  }
+  else if (pfault_addr <= p->sz){
+    //printf("Page Fault - Lazy allocation\n");
+    lazy_memory_allocation(pfault_addr);
+    return 0;
+  }
+  else
+  {
+    exit(-1);
+    return 0; //never reaches here
+  }
+}
+
+
