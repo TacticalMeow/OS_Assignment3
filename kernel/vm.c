@@ -214,8 +214,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
-      uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+      if((*pte & PTE_PG)==0) //if the page is not on swap we free the physical memory
+      {
+        uint64 pa = PTE2PA(*pte);
+        kfree((void*)pa);
+      }
       #ifndef NONE
             if(a>>PGSIZE_SHIFT_BITS < MAX_TOTAL_PAGES){
               p->page_metadata[a>>PGSIZE_SHIFT_BITS].on_phy_mem = 0;
@@ -324,7 +327,6 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
     // checking if we need to swap pages
     if (count_pages_in_physical_memory(p) >= MAX_PSYC_PAGES)
     {
-      printf("here");
       // Map a new page
       if (mappages(pagetable, a, PGSIZE, 0, PTE_W | PTE_R | PTE_X | PTE_U | PTE_PG) < 0)
       {
@@ -408,7 +410,6 @@ freewalk(pagetable_t pagetable)
 void
 uvmfree(pagetable_t pagetable, uint64 sz)
 {
-  printf("size before free : %d", sz);
   if(sz > 0)
     uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
   freewalk(pagetable);
@@ -844,13 +845,15 @@ int handle_pagefault(uint64 pfault_addr)
     swap_page_in(pfault_addr, pte, p);
     return 0;
   }
-  else if (pfault_addr <= p->sz){
-    printf("Page Fault - Lazy allocation\n");
-    lazy_memory_allocation(pfault_addr);
-    return 0;
-  }
+  // else if (pfault_addr <= p->sz){
+  //   printf("Page Fault - Lazy allocation\n");
+  //   lazy_memory_allocation(pfault_addr);
+  //   return 0;
+  // }
   else
   {
+    printf("usertrap(): segfault scause %p pid=%d\n", r_scause(), p->pid);
+    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     exit(-1);
     return 0; //never reaches here
   }

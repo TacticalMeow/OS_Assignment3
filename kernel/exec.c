@@ -8,6 +8,8 @@
 #include "elf.h"
 
 static int loadseg(pde_t *pgdir, uint64 addr, struct inode *ip, uint offset, uint sz);
+struct pte_swap_metadata* backup_pg_metadata(struct proc* p);
+void restore_pg_metadata(struct pte_swap_metadata* backup, struct proc* p);
 
 int
 exec(char *path, char **argv)
@@ -20,7 +22,9 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
+  struct pte_swap_metadata* swap_meta_backup = backup_pg_metadata(p);
 
+  reset_swap_metadata(p);
   begin_op();
 
   if((ip = namei(path)) == 0){
@@ -115,12 +119,13 @@ exec(char *path, char **argv)
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
-
+  kfree(swap_meta_backup);
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
   if(pagetable)
     proc_freepagetable(pagetable, sz);
+  restore_pg_metadata(swap_meta_backup,p);
   if(ip){
     iunlockput(ip);
     end_op();
@@ -154,4 +159,30 @@ loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz
   }
   
   return 0;
+}
+
+struct pte_swap_metadata* backup_pg_metadata(struct proc* p)
+{
+  struct pte_swap_metadata* backup_metadata = (struct pte_swap_metadata*)kalloc();
+  if (backup_metadata == 0 )
+    return 0;
+  
+  for(int i=0;i<MAX_TOTAL_PAGES;i++)
+  {
+      backup_metadata[i].counter = p->page_metadata[i].counter;
+      backup_metadata[i].offset_in_swap = p->page_metadata[i].offset_in_swap;
+      backup_metadata[i].on_phy_mem = p->page_metadata[i].on_phy_mem;
+  }
+  return backup_metadata;
+}
+
+void restore_pg_metadata(struct pte_swap_metadata* backup, struct proc* p)
+{ 
+  for(int i=0;i<MAX_TOTAL_PAGES;i++)
+  {
+    p->page_metadata[i].counter = backup[i].counter;
+    p->page_metadata[i].offset_in_swap = backup[i].offset_in_swap;
+    p->page_metadata[i].on_phy_mem = backup[i].on_phy_mem;
+  }
+  kfree(backup);
 }

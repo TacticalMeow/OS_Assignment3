@@ -289,17 +289,16 @@ growproc_old(int n)
 int
 growproc(int n)
 {
-  #ifdef NONE
+  #ifndef NONE
     return growproc_old(n);
   #endif
   uint sz;
   struct proc *p = myproc();
-
   sz = p->sz;
   if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
-  p->sz = p->sz + n;
+  p->sz = sz;
   return 0;
 }
 
@@ -740,5 +739,15 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+void reset_swap_metadata(struct proc *p)
+{
+  for (int i = 0; i < MAX_TOTAL_PAGES; i++)
+  {
+    p->page_metadata[i].offset_in_swap = -1;
+    p->page_metadata[i].counter = 0;
+    p->page_metadata[i].on_phy_mem = 0;
   }
 }
