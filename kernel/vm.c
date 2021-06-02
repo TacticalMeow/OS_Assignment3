@@ -338,7 +338,17 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 
       int offset = file_empty_offset_location(p);
 
+      mem = kalloc();
+      if (mem == 0)
+      {
+        uvmdealloc(pagetable, a, oldsz);
+        return 0;
+      }
+      writeToSwapFile(p,mem,offset,PGSIZE);
+      kfree(mem);
       p->page_metadata[a >> PGSIZE_SHIFT_BITS].offset_in_swap = offset;
+      p->page_metadata[a>>PGSIZE_SHIFT_BITS].on_phy_mem = 0;
+
     }
     else
     {
@@ -807,10 +817,10 @@ uint64 file_empty_offset_location(struct proc *p)
   uint empty_offset = -1;
 
 
-  for(int i=0; i<p->sz; i = i+PGSIZE)
+  for(int i=0; i< 17*PGSIZE ; i = i+PGSIZE)
   {
     in_use = 0;
-    for(int j=0; j<MAX_TOTAL_PAGES; j++){
+    for(int j=0 ; j < MAX_TOTAL_PAGES ; j++){
       if(p->page_metadata[j].offset_in_swap == i){
         in_use = 1;
         goto offset_in_use;
@@ -842,11 +852,11 @@ void swap_page_into_file(uint64 offset,struct proc * p){
 
   pte_t *swapout_pte = walk(p->pagetable, page_to_swapout_va, 0);
 
-  //write the information from this file to memory
+  //write the information from this page to memory
   uint64 physical_addr = PTE2PA(*swapout_pte);
 
-  printf("Chosen page %d. Data in chosen page is %s\n", swap_out_idx, physical_addr);
-
+  printf("Chosen page %d. Data in chosen page is %s \n", swap_out_idx, physical_addr);
+  printf("Write to swap file: phyaddr:%x, offset:%d \n", physical_addr, offset);
   if (writeToSwapFile(p, (char *)physical_addr, offset, PGSIZE) == -1)
     panic("write to file failed");
 
