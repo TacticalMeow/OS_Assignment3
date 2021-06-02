@@ -143,8 +143,11 @@ found:
     p->page_metadata[i].offset_in_swap = -1;
     p->page_metadata[i].counter = 0;
     p->page_metadata[i].on_phy_mem = 0;
+    p->page_queue.queue[i] = -1;
   }
-
+  p->page_queue.front_of_queue = 0;
+  p->page_queue.back_of_queue = -1;
+  p->page_queue.total_pages_in_queue=0;
   if(p->pid>1)
   {
     release(&p->lock);
@@ -289,9 +292,7 @@ growproc_old(int n)
 int
 growproc(int n)
 {
-  #ifndef NONE
-    return growproc_old(n);
-  #endif
+  return growproc_old(n);
   uint sz;
   struct proc *p = myproc();
   sz = p->sz;
@@ -376,10 +377,14 @@ fork(void)
   acquire(&np->lock);
   for (int i = 0; i < MAX_TOTAL_PAGES; i++)
   {
-    np->page_metadata[i].counter = myproc()->page_metadata[i].counter;
+    np->page_metadata[i].counter = p->page_metadata[i].counter;
     np->page_metadata[i].offset_in_swap = p->page_metadata[i].offset_in_swap;
     np->page_metadata[i].on_phy_mem = p->page_metadata[i].on_phy_mem;
+    np->page_queue.queue[i] = p->page_queue.queue[i];
   }
+  np->page_queue.front_of_queue = p->page_queue.front_of_queue;
+  np->page_queue.back_of_queue = p->page_queue.back_of_queue;
+  np->page_queue.total_pages_in_queue = p->page_queue.total_pages_in_queue;
 #endif
   //end assign 3
   release(&np->lock);
@@ -749,5 +754,9 @@ void reset_swap_metadata(struct proc *p)
     p->page_metadata[i].offset_in_swap = -1;
     p->page_metadata[i].counter = 0;
     p->page_metadata[i].on_phy_mem = 0;
+    p->page_queue.queue[i]=-1;
   }
+  p->page_queue.front_of_queue=0;
+  p->page_queue.back_of_queue=-1;
+  p->page_queue.total_pages_in_queue=0;
 }

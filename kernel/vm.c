@@ -11,7 +11,8 @@
 
 int count_pages_in_physical_memory(struct proc *p);
 uint64 file_empty_offset_location(struct proc *p);
-int reset_counter(void);
+int reset_counter(int page_num_to_insert);
+void dequeue_page_by_idx(int page_idx,struct proc * p);
 /*
  * the kernel's page table.
  */
@@ -197,9 +198,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     uvmunmap_old(pagetable,va,npages,do_free);
     return;
   #endif
-  #ifndef NONE
   struct proc * p = myproc();
-  #endif
   uint64 a;
   pte_t *pte;
 
@@ -214,25 +213,24 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
-      if((*pte & PTE_PG)==0) //if the page is not on swap we free the physical memory
+      if ((*pte & PTE_PG) == 0) //if the page is not on swap we free the physical memory
       {
         uint64 pa = PTE2PA(*pte);
-        kfree((void*)pa);
+        kfree((void *)pa);
       }
-      #ifndef NONE
-            if(a>>PGSIZE_SHIFT_BITS < MAX_TOTAL_PAGES){
-              p->page_metadata[a>>PGSIZE_SHIFT_BITS].on_phy_mem = 0;
-              p->page_metadata[a>>PGSIZE_SHIFT_BITS].offset_in_swap = -1;
-            }
-      #endif
+      if (a >> PGSIZE_SHIFT_BITS < MAX_TOTAL_PAGES)
+      {
+        p->page_metadata[a >> PGSIZE_SHIFT_BITS].on_phy_mem = 0;
+        p->page_metadata[a >> PGSIZE_SHIFT_BITS].offset_in_swap = -1;
+        if ((*pte & PTE_PG) == 0)
+          dequeue_page_by_idx(a >> PGSIZE_SHIFT_BITS, p);
+      }
     }
     else
     {
-      #ifndef NONE
-            if(a>>PGSIZE_SHIFT_BITS < MAX_TOTAL_PAGES){
-              p->page_metadata[a>>PGSIZE_SHIFT_BITS].offset_in_swap = -1;
-            }
-      #endif
+      if(a>>PGSIZE_SHIFT_BITS < MAX_TOTAL_PAGES){
+        p->page_metadata[a>>PGSIZE_SHIFT_BITS].offset_in_swap = -1;
+      }
     }   
     *pte = 0;
   }
@@ -270,7 +268,6 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
 uint64
 uvmalloc_old(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 {
-  printf("uvmold alloc");
   char *mem;
   uint64 a;
   if (newsz < oldsz)
@@ -360,7 +357,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
       }
       //set page metadata after allocating page
       p->page_metadata[a>>PGSIZE_SHIFT_BITS].on_phy_mem = 1;
-      p->page_metadata[a>>PGSIZE_SHIFT_BITS].counter = reset_counter();
+      p->page_metadata[a>>PGSIZE_SHIFT_BITS].counter = reset_counter((a>>PGSIZE_SHIFT_BITS));
     }
   }
 
@@ -637,6 +634,83 @@ update_age(void){
   #endif
   return;
 }
+//-----------------------------PAGE_QUEUE METHODS-----------------------------
+
+
+void insert_to_page_queue(int page_num_to_insert, struct proc *p)
+{
+  if (p->page_queue.total_pages_in_queue > MAX_PSYC_PAGES)
+    panic("SCFIFO: page queue overflow");
+  
+  struct page_queue* current_q = &p->page_queue;
+  
+  if(current_q->back_of_queue==MAX_TOTAL_PAGES-1)
+    current_q->back_of_queue=-1;
+
+  current_q->back_of_queue++;
+  current_q->queue[current_q->back_of_queue] = page_num_to_insert;
+  current_q->total_pages_in_queue++;
+}
+
+//removes from page queue and returns the page_num removed
+void dequeue_page(struct proc *p)
+{
+  struct page_queue *current_q = &p->page_queue;
+
+  current_q->front_of_queue++;
+  if (current_q->front_of_queue == MAX_TOTAL_PAGES)
+    current_q->front_of_queue = 0;
+  current_q->total_pages_in_queue--;
+}
+
+void dequeue_page_by_idx(int page_idx,struct proc * p)
+{
+  struct page_queue * curr_q = &(p->page_queue);
+  int cur_page;
+  int page_count = curr_q->total_pages_in_queue;
+  for(int i = 0; i < page_count; i++){
+    cur_page = curr_q->queue[curr_q->front_of_queue];
+    dequeue_page(p);
+    if (!(page_idx == cur_page)){
+     insert_to_page_queue(cur_page,p);
+    }
+  }
+}
+
+//-----------------------------PAGE_QUEUE METHODS END-----------------------------
+
+
+
+int SCFIFO_impl(struct proc *p)
+{
+  int current_page_num=-1;
+  int total_pages=p->page_queue.total_pages_in_queue;
+  for(int i=0 ; i < total_pages ;i++)
+  {
+    current_page_num = p->page_queue.queue[p->page_queue.front_of_queue];
+    //first find pte of the page in front of queue
+    pte_t * pte = walk(p->pagetable,current_page_num<<PGSIZE_SHIFT_BITS,0);
+
+    if(pte==0)
+      panic("SCFIFO: pte missing");
+    if((*pte & PTE_A)) //page was accessed , so remove to front of queue with PTE_A turned off
+    {
+      *pte = *pte & (~PTE_A);
+      dequeue_page(p);
+      insert_to_page_queue(current_page_num,p);
+    }
+    else
+    {
+      dequeue_page(p);
+      return current_page_num;
+    }
+    
+  }
+
+  current_page_num = p->page_queue.queue[p->page_queue.front_of_queue];
+  dequeue_page(p);
+  return current_page_num;
+}
 
 int NFUA_impl(struct proc *p){
   uint min_age = -1;
@@ -704,6 +778,9 @@ int get_page_to_swap_out(struct proc * p)
   #endif
   #ifdef LAPA
     return LAPA_impl(p);
+  #endif
+  #ifdef SCFIFO
+    return SCFIFO_impl(p);
   #endif
   return 0;
 }
@@ -782,7 +859,7 @@ void swap_page_into_file(uint64 offset,struct proc * p){
 }
 
 
-int reset_counter()
+int reset_counter(int page_num_to_insert)
 {
    #ifdef NFUA
     return 0;
@@ -790,9 +867,10 @@ int reset_counter()
   #ifdef LAPA
     return MAX_INT;
   #endif
-  // #if SELECTION==SCFIFO
-  //   return insert_to_queue(fifo_init_pages);
-  // #endif 
+  #ifdef SCFIFO
+    insert_to_page_queue(page_num_to_insert, myproc());
+    return 0;
+  #endif 
   return 0;
 }
 
@@ -819,7 +897,7 @@ void swap_page_in(uint64 faulting_address, pte_t * missing_pte,struct proc * p){
   *missing_pte = PA2PTE((uint64)new_pa_for_page) | ((PTE_FLAGS(*missing_pte)& ~PTE_PG) | PTE_V);
   
   // Clean up and update new page_metadata
-  p->page_metadata[faulting_page_idx].counter = reset_counter();
+  p->page_metadata[faulting_page_idx].counter = reset_counter(faulting_page_idx);
 
   p->page_metadata[faulting_page_idx].offset_in_swap = -1;
 

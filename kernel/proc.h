@@ -9,6 +9,12 @@ struct pte_swap_metadata {
   int counter;
 };
 
+struct page_queue{
+  uint total_pages_in_queue;
+  int queue[MAX_TOTAL_PAGES];
+  uint front_of_queue;
+  uint back_of_queue;
+};
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -118,6 +124,6 @@ struct proc {
   char name[16];               // Process name (debugging)
   int current_phy_pages;
   struct file *swapFile;
-
+  struct page_queue page_queue;
   struct pte_swap_metadata page_metadata[MAX_TOTAL_PAGES];
 };

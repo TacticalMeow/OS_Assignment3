@@ -22,9 +22,10 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
-  struct pte_swap_metadata* swap_meta_backup = backup_pg_metadata(p);
-
-  reset_swap_metadata(p);
+  #ifndef NONE 
+    struct pte_swap_metadata* swap_meta_backup = backup_pg_metadata(p);
+    reset_swap_metadata(p);
+  #endif
   begin_op();
 
   if((ip = namei(path)) == 0){
@@ -119,13 +120,17 @@ exec(char *path, char **argv)
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
-  kfree(swap_meta_backup);
+  #ifndef NONE
+    kfree(swap_meta_backup);
+  #endif
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
   if(pagetable)
     proc_freepagetable(pagetable, sz);
+  #ifndef NONE
   restore_pg_metadata(swap_meta_backup,p);
+  #endif
   if(ip){
     iunlockput(ip);
     end_op();
