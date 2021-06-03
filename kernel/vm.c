@@ -370,7 +370,6 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
       p->page_metadata[a>>PGSIZE_SHIFT_BITS].counter = reset_counter((a>>PGSIZE_SHIFT_BITS));
     }
   }
-
   return newsz;
 }
 
@@ -388,7 +387,6 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
     int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
     uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
   }
-
   return newsz;
 }
 
@@ -476,7 +474,7 @@ int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    //assign3 check if we are on swap
+    // assign3 check if we are on swap
     if((*pte & PTE_PG) == 0)
     {
       if ((mem = kalloc()) == 0)
@@ -854,9 +852,7 @@ void swap_page_into_file(uint64 offset,struct proc * p){
 
   //write the information from this page to memory
   uint64 physical_addr = PTE2PA(*swapout_pte);
-
-  printf("Chosen page %d. Data in chosen page is %s \n", swap_out_idx, physical_addr);
-  printf("Write to swap file: phyaddr:%x, offset:%d \n", physical_addr, offset);
+  
   if (writeToSwapFile(p, (char *)physical_addr, offset, PGSIZE) == -1)
     panic("write to file failed");
 
@@ -929,15 +925,9 @@ int handle_pagefault(uint64 pfault_addr)
 
 
   if(pte != 0 && (!(*pte & PTE_V) && *pte & PTE_PG)){
-    printf("Page Fault - Page was out of memory\n");
     swap_page_in(pfault_addr, pte, p);
     return 0;
   }
-  // else if (pfault_addr <= p->sz){
-  //   printf("Page Fault - Lazy allocation\n");
-  //   lazy_memory_allocation(pfault_addr);
-  //   return 0;
-  // }
   else
   {
     printf("usertrap(): segfault scause %p pid=%d\n", r_scause(), p->pid);
